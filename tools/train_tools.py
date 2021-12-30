@@ -9,16 +9,7 @@ import glob
 from numpy.lib.stride_tricks import as_strided
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
-from config import cfg
-
-
-color_list = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (255, 128, 0), (0, 255, 128), (128, 0, 255)]
-for r in range(3):
-    for g in range(3):
-        for b in range(3):
-            color_list.append((r * 62 + 127, g * 62 + 127, b * 62 + 127))
-del color_list[0]
-random.shuffle(color_list)
+from config_kp import cfg
 
 def pool2d(A, kernel_size, stride, padding, pool_mode='max'):
     # Padding
@@ -39,72 +30,54 @@ def pool2d(A, kernel_size, stride, padding, pool_mode='max'):
     elif pool_mode == 'avg':
         return A_w.mean(axis=(1,2)).reshape(output_shape)
 
-def make_point_image_for_prediction(img, hm, os, kp, threshold=0.3, need_nms=True): # w * h * 8 * 2
+def make_point_image_for_prediction(img, hm, kp, threshold=0.3, need_nms=True): # w * h * 8 * 2
     color_list = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (255, 128, 0), (0, 255, 128), (128, 0, 255)]
     if need_nms:
-        hm_max = pool2d(hm, kernel_size=11, stride=1, padding=5, pool_mode='max')
+        hm_max = pool2d(hm, kernel_size=3, stride=1, padding=1, pool_mode='max')
         keep = (hm_max == hm).astype(np.float)
         hm = hm * keep
 
     inds = np.where(hm >= threshold)
     Hs = inds[0]
     Ws = inds[1]
+
     count = 0
     for ind in range(Hs.size):
         count += 1
-        Center_h_int = Hs[ind]
-        Center_w_int = Ws[ind]
-        Center_h = Center_h_int * cfg.rate + os[Center_h_int, Center_w_int, 0]
-        Center_w = Center_w_int * cfg.rate + os[Center_h_int, Center_w_int, 1]
-        cv2.circle(img, (int(Center_w + 0.5), int(Center_h + 0.5)), 5, color=color_list[count % 6], thickness=2)
-        points = kp[Center_h_int, Center_w_int, :, :]
+        TH_int = Hs[ind]
+        TW_int = Ws[ind]
 
-        for p in range(16):
-                h = int(points[p, 0] + Center_h + 0.5)
-                w = int(points[p, 1] + Center_w + 0.5)
-                cv2.circle(img, (w, h), 3, color=color_list[count % 6], thickness=-1)
+        hs = kp[TH_int, TW_int, 0:cfg.point_num] + TH_int + 0.5
+        ws = kp[TH_int, TW_int, cfg.point_num:cfg.point_num * 2] + TW_int + 0.5
+        for p in range(cfg.point_num):
+            h = int(hs[p] * cfg.rate + 0.5)
+            w = int(ws[p] * cfg.rate + 0.5)
+            cv2.circle(img, (w, h), 3, color=color_list[count % 6], thickness=-1)
 
     return img
 
-def make_GT_image(img, hm, os, kp):
+def make_GT_image(img, hm, kp):
     color_list = [(0, 255, 0), (0, 0, 255), (255, 0, 0), (255, 128, 0), (0, 255, 128), (128, 0, 255)]
     inds = np.where(hm == 1)
+
     Hs = inds[0]
     Ws = inds[1]
+
     count = 0
     for ind in range(Hs.size):
         count += 1
-        Center_h_int = Hs[ind]
-        Center_w_int = Ws[ind]
-        Center_h = Center_h_int * cfg.rate + os[Center_h_int, Center_w_int, 0]
-        Center_w = Center_w_int * cfg.rate + os[Center_h_int, Center_w_int, 1]
-        cv2.circle(img, (int(Center_w + 0.5), int(Center_h + 0.5)), 5, color=color_list[count % 6], thickness=2)
-        points = kp[Center_h_int, Center_w_int, :, :]
-        for p in range(16):
-            h = int(points[p, 0] + Center_h + 0.5)
-            w = int(points[p, 1] + Center_w + 0.5)
+        TH_int = Hs[ind]
+        TW_int = Ws[ind]
+        # if hm[TH_int, TW_int] == 1:
+        #     continue
+        hs = kp[TH_int, TW_int, 0:cfg.point_num] + TH_int + 0.5
+        ws = kp[TH_int, TW_int, cfg.point_num:cfg.point_num * 2] + TW_int + 0.5
+        for p in range(cfg.point_num):
+            h = int(hs[p] * cfg.rate + 0.5)
+            w = int(ws[p] * cfg.rate + 0.5)
             cv2.circle(img, (w, h), 3, color=color_list[count % 6], thickness=-1)
+
     return img
-
-def load_val_images(image_path):
-    image = cv2.imread(image_path)
-    image = np.array(image, np.float32) / 255
-    return image
-
-
-def record_results_val(out_image, index):
-    out_image = out_image[0]
-    image = out_image[0][0]
-    pred_hm = out_image[1][0][0]
-    pred_os = out_image[1][1][0]
-    pred_kp = out_image[1][2][0]
-
-    image = np.array(image * 255, dtype=np.uint8)
-    cv2.imwrite('./tmp/val_%03d_1image.png' % (index), image)
-
-    pred = make_point_image_for_prediction(image, pred_hm, pred_os, pred_kp, threshold=0.3, need_nms=True)
-    cv2.imwrite('./tmp/val_%03d_2pred.png' % (index), pred)
-    return
 
 
 def record_results(out_lists, save_dir='./tmp/'):
@@ -112,46 +85,38 @@ def record_results(out_lists, save_dir='./tmp/'):
 
     images = []
     label_hms = []
-    label_oss = []
     label_kps = []
 
     pred_hms = []
     pred_kps = []
-    pred_oss = []
 
     for out_image in out_lists:
         images.append(out_image[0])
         label_hms.append(out_image[1])
-        label_oss.append(out_image[2])
-        label_kps.append(out_image[3])
-        pred_hms.append(out_image[4][0])
-        pred_oss.append(out_image[4][1])
-        pred_kps.append(out_image[4][2])
+        label_kps.append(out_image[2])
+        pred_hms.append(out_image[3][0])
+        pred_kps.append(out_image[3][1])
 
     images = np.concatenate(images, 0)
     label_hms = np.concatenate(label_hms, 0)
-    label_oss = np.concatenate(label_oss, 0)
     label_kps = np.concatenate(label_kps, 0)
     pred_hms = np.concatenate(pred_hms, 0)
-    pred_oss = np.concatenate(pred_oss, 0)
     pred_kps = np.concatenate(pred_kps, 0)
 
     for index, image in enumerate(images):
         image = images[index]
         label_hm = label_hms[index]
-        label_os = label_oss[index]
         label_kp = label_kps[index]
         pred_hm = pred_hms[index]
-        pred_os = pred_oss[index]
         pred_kp = pred_kps[index]
 
         image = np.array(image * 255, dtype=np.uint8)
         cv2.imwrite(save_dir + '/%03d_0image.png' % (index), image)
 
-        label = make_GT_image(image.copy(), label_hm, label_os, label_kp)
+        label = make_GT_image(image.copy(), label_hm, label_kp)
         cv2.imwrite(save_dir + '/%03d_1label.png' % (index), label)
 
-        pred = make_point_image_for_prediction(image.copy(), pred_hm, pred_os, pred_kp, threshold=0.3, need_nms=True)
+        pred = make_point_image_for_prediction(image.copy(), pred_hm, pred_kp, threshold=cfg.threshold_extract, need_nms=False)
         cv2.imwrite(save_dir + '/%03d_2pred.png' % (index), pred)
 
         label_hm = np.array(label_hm * 255, np.uint8)
