@@ -1,94 +1,99 @@
 '''
-DataLoader for Training In Tensorflow Template
+DataLoader for Training In Tensorflow Template.
 By Kwanwoo Park, 2022.
 '''
 import tensorflow as tf
 import random
 import cv2
-import numpy as np
 import os
+import numpy as np
 import json
-import glob
 from config_kp import cfg
 
+os.environ['CUDA_VISIBLE_DEVICES'] = '0, 1, 2, 3'
+
 class Datasets():
-    def __init__(self):
+    def __init__(self, is_training):
         super(Datasets, self).__init__()
+        self.is_training = is_training
 
-    def read_image(self, img_path):
-        img_path = img_path.decode("utf-8")
-        img_path = './dataset/' + img_path
+    def Generator(self):
+        for data in self.data_list:
+            img_path, label = data
+            if self.is_training:
+                img_path = './data/train/' + img_path
+            else:
+                img_path = './data/val/' + img_path
+            image = cv2.imread(img_path)
+            image = image.astype(np.float32) / 255
+            yield (image, label)
 
-        label_path = img_path.replace('/images/', '/jsons/').replace('.png', '.json')
-        image = cv2.imread(img_path)
-        lanes = json.load(open(label_path))
-        image = image.astype(np.float32) / 255
-        flip = np.random.randint(2) > 0
-
-        hm, kp = lane_process(lanes, flip)
-        if flip:
-            image = np.flip(image, axis=1)
-
-        return image, hm, kp
-
-    def argument(self, image, hm, kp):
-        image.set_shape([cfg.height, cfg.width, 3])
-        hm.set_shape([int(cfg.height / cfg.rate), int(cfg.width / cfg.rate)])
-        kp.set_shape([int(cfg.height / cfg.rate), int(cfg.width / cfg.rate), cfg.point_num * 2])
-
+    def argument(self, image, label):
+        image = tf.image.random_flip_left_right(image)
+        # image = tf.image.random_flip_up_down(image)
         image = tf.image.random_brightness(image, 0.15)
         image = tf.image.random_contrast(image, 0.667, 1.5)
         image = tf.image.random_hue(image, 0.15)
         image = tf.image.random_saturation(image, 0.667, 1.5)
         image = tf.clip_by_value(image, 0, 1)
-        image = image
 
-        return image, hm, kp
+        label = tf.one_hot(label, depth=cfg.class_num, dtype=tf.float32)
+
+        return image, label
 
     def shuffling(self):
-        random.shuffle(self.image_list)
+        random.shuffle(self.data_list)
 
     def Generate_dataset(self, list_name):
-        self.image_list = json.load(open('./dataset/' + list_name))
-        random.shuffle(self.image_list)
-        total_iteration = int(len(self.image_list) / cfg.batch_size)
-        dataset = tf.data.Dataset.from_tensor_slices((self.image_list))
-        dataset = dataset.map(lambda image_list: tuple(tf.py_func(self.read_image, [image_list], [tf.float32, tf.float32, tf.float32])))
+        self.data_list = json.load(open(list_name))
+        self.shuffling()
+        dats_size = cfg.batch_size * len(cfg.gpus)
+        dataset = tf.data.Dataset.from_generator(self.Generator, (tf.float32, tf.int32), (tf.TensorShape([cfg.height, cfg.width, 3]), tf.TensorShape([])))
         dataset = dataset.map(self.argument)
+        dataset = dataset.shuffle(dats_size)
+        dataset = dataset.batch(dats_size)
         dataset = dataset.repeat()
-        dataset = dataset.batch(cfg.batch_size)
 
         iterator = dataset.make_initializable_iterator()
+        total_iteration = int(len(self.data_list) / (dats_size))
         return iterator, total_iteration
 
-
+### This is for test. ###
 if __name__ == '__main__':
-    datasets = Datasets()
-    train_iterator, total_iteration = datasets.Generate_dataset('train_list.json')
-    tf_images, tf_hm, tf_kp = train_iterator.get_next()
+    with tf.Graph().as_default(), tf.device('/device:CPU:0'):
+        datasets = Datasets(is_training=True)
+        train_iterator, total_iteration = datasets.Generate_dataset(cfg.train_list)
+        tf_images, tf_labels = train_iterator.get_next()
+        tf_images = tf.split(tf_images, len(cfg.gpus), axis=0)
+        tf_labels = tf.split(tf_labels, len(cfg.gpus), axis=0)
+        data_lists = []
+        for i in cfg.gpus:
+            with tf.device('/gpu:%d' % i):
+                tf_pred = tf.reduce_mean(tf_images[i], axis=3)
+                data_lists.append([tf_images[i], tf_labels[i], tf_pred])
 
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    sess_config = tf.ConfigProto()
+        sess_config = tf.ConfigProto(allow_soft_placement=True)
+        sess_config.gpu_options.allow_growth = True
+        sess_config.gpu_options.allocator_type = 'BFC'
+        sess = tf.Session(config=sess_config)
 
-    sess = tf.Session(config=sess_config)
-
-    sess.run(train_iterator.initializer)
-    count = 1
-    for i in range(1000):
-        train_image, train_hm, train_kp = sess.run([tf_images, tf_hm, tf_kp])
-        for b in range(cfg.batch_size):
-            image = train_image[b]
-            hm = train_hm[b]
-            kp = train_kp[b]
-
-            pred_img = make_lane_image(image * 255, hm, kp)
-            cv2.imwrite('./tmp/%06d_.png' % count, pred_img)
-
-            # image = np.array(image * 255, np.uint8)
-            # cv2.imwrite('./tmp/%06d.png'%count, image)
-
-            hm = cv2.resize(hm, (800, 352))
-            cv2.imwrite('./tmp/%06d.png' % count, hm*255)
-            count += 1
-            print(count)
-
+        with sess.as_default():
+            sess.run(train_iterator.initializer)
+            datasets.shuffling()
+            while 1:
+                data_loaded = sess.run(data_lists)
+                for i in range(len(cfg.gpus)):
+                    datas = data_loaded[i]
+                    images, labels, preds = datas
+                    for b in range(cfg.batch_size):
+                        image = images[b]
+                        label = labels[b]
+                        pred = preds[b]
+                        print(label)
+                        print(pred)
+                        print()
+                        cv2.imshow("preview", image)
+                        cv2.waitKey(1)
+                print()
+                print()
+                print()
